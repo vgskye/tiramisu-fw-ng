@@ -1,0 +1,10 @@
+[package]
+name = "icd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+postcard = "1.1.1"
+postcard-rpc = "0.11.8"
+postcard-schema = "0.2.1"
+serde = { version = "1.0.218", default-features = false, features = ["derive"] }

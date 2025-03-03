@@ -1,0 +1,11 @@
+[package]
+name = "espresso"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6.3"
+icd = { version = "0.1.0", path = "../icd" }
+postcard-rpc = { version = "0.11.8", features = ["use-std", "raw-nusb"] }
+tokio = { version = "1.43.0", features = ["macros", "net", "rt-multi-thread"] }
+zerocopy = "0.8.21"

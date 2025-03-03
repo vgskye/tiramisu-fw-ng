@@ -1,0 +1,4 @@
+# This file was automatically generated.
+
+[default.general]
+chip = "nRF52840_xxAA"

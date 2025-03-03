@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "espresso"
+		}
+	],
+	"settings": {
+		"rust-analyzer.cargo.allTargets": false
+	}
+}
