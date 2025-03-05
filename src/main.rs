@@ -5,7 +5,7 @@ mod app;
 mod fmt;
 mod handlers;
 
-use core::f32::consts::PI;
+use core::{convert::Infallible, f32::consts::PI};
 
 use app::AppTx;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -24,7 +24,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 use embassy_executor::Spawner;
 use embassy_nrf::{
-    bind_interrupts, gpio, pac, peripherals,
+    bind_interrupts, gpio::{self, Pin}, pac, peripherals,
     ppi::ConfigurableChannel,
     saadc, twim,
     usb::{self, vbus_detect::VbusDetect},
@@ -97,7 +97,10 @@ async fn main(spawner: Spawner) {
         pac::FICR.deviceid(0).read()
     );
 
-    let mut radio = Radio::new(p.RADIO, Irqs, esb_embassy::Config::default());
+    let mut radio = Radio::new(p.RADIO, Irqs, esb_embassy::Config {
+        tx_output_power: embassy_nrf::radio::TxPower::POS8_DBM,
+        ..esb_embassy::Config::default()
+    });
 
     radio.set_base_address_0(*b"Cake");
     radio.set_base_address_1(*b"Cafe");
@@ -125,7 +128,7 @@ async fn main(spawner: Spawner) {
             }
         });
     let ser_buf = SERIAL_STRING.init(ser_buf);
-    let ser_buf = core::str::from_utf8(ser_buf.as_slice()).unwrap();
+    let ser_buf = unsafe { core::str::from_utf8_unchecked(ser_buf.as_slice()) };
 
     // USB/RPC INIT
     let driver = usb::Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
@@ -173,6 +176,116 @@ async fn main(spawner: Spawner) {
             USB_SIG.wait().await;
         }
         Timer::after_millis(500).await;
+    }
+}
+
+trait Imu {
+    type Error;
+    async fn init(&mut self) -> Result<(), Self::Error>;
+    async fn bulk_read(
+        &mut self,
+        gyro_sample: &mut impl FnMut([f32; 3]),
+        accel_sample: &mut impl FnMut([f32; 3])
+    ) -> Result<(), Self::Error>;
+    async fn prepare_wake(&mut self) -> Result<(), Self::Error>;
+}
+
+struct LSM6DSV<'d, T: twim::Instance> {
+    twim: twim::Twim<'d, T>,
+    int1: gpio::AnyPin
+}
+
+impl<T: twim::Instance> Imu for LSM6DSV<'_, T> {
+    type Error = twim::Error;
+
+    async fn init(&mut self) -> Result<(), Self::Error> {
+        self.twim.write(ADDRESS, &[0x62, 0b00]).await?; // HAODR_CFG to set 00
+        self.twim.write(ADDRESS, &[0x08, 0]).await?; // FIFO_CTRL2
+        self.twim.write(ADDRESS, &[0x10, 0b0010110]).await?; // accel ODR: OP_MODE_XL to HAODR, ODR_XL to 120Hz
+        self.twim.write(ADDRESS, &[0x11, 0b0011000]).await?; // gyro ODR: OP_MODE_G to HAODR, ODR_G to 480Hz
+        self.twim.write(ADDRESS, &[0x12, (1 << 6) | (1 << 2)]).await?; // BDU to 1, IF_INC to 1
+        self.twim.write(ADDRESS, &[0x15, 0b0011]).await?; // gyro range: FS_G to ±1000 dps
+        self.twim.write(ADDRESS, &[0x17, 0b10]).await?; // accel range: FS_XL to ±8 g
+        self.twim.write(ADDRESS, &[0x09, (0b1000) | (0b1000 << 4)]).await?;
+        self.twim.write(ADDRESS, &[0x0a, 0b110]).await?; // FIFO mode: continuous mode
+        self.twim.write(ADDRESS, &[0x13, 0b10]).await?; // DRDY_PULSED to 1
+        self.twim.write(ADDRESS, &[0x0d, 0b1]).await?; // INT1_CTRL: INT1_DRDY_XL to 1
+        Ok(())
+    }
+
+    async fn bulk_read(
+        &mut self,
+        gyro_sample: &mut impl FnMut([f32; 3]),
+        accel_sample: &mut impl FnMut([f32; 3])
+    ) -> Result<(), Self::Error> {
+        #[unsafe(link_section = "data")]
+        static HEX_1B: [u8; 1] = [0x1b];
+        #[unsafe(link_section = "data")]
+        static HEX_78: [u8; 1] = [0x78];
+        let mut size_buf = [0u8; 2];
+        let mut buf = [0u8; 7 * 16];
+        loop {
+            self.twim.write_read(ADDRESS, &HEX_1B, &mut size_buf).await?;
+            let len = (size_buf[0] as usize) | (((size_buf[1] & 0b1) as usize) << 8);
+            let read_size = (7 * (len + 1)).clamp(0, 16 * 7);
+            self.twim.write_read(ADDRESS, &HEX_78, &mut buf[..read_size]).await?;
+            let buf: &[[u8; 7]; 16] = zerocopy::transmute_ref!(&buf);
+            for entry in &buf[..(len + 1)] {
+                let tag = entry[0] >> 3;
+                match tag {
+                    0x00 => {
+                        return Ok(())
+                    },
+                    0x01 => {
+                        let x = i16::from_le_bytes([entry[1], entry[2]]);
+                        let y = i16::from_le_bytes([entry[3], entry[4]]);
+                        let z = i16::from_le_bytes([entry[5], entry[6]]);
+                        gyro_sample([GSCALE * x as f32, GSCALE * y as f32, GSCALE * z as f32])
+                    }
+                    0x02 => {
+                        let x = i16::from_le_bytes([entry[1], entry[2]]);
+                        let y = i16::from_le_bytes([entry[3], entry[4]]);
+                        let z = i16::from_le_bytes([entry[5], entry[6]]);
+                        accel_sample([
+                            ACCEL_SENSITIVITY * x as f32,
+                            ACCEL_SENSITIVITY * y as f32,
+                            ACCEL_SENSITIVITY * z as f32,
+                        ])
+                    }
+                    x => info!("unknown tag: {=u8:02X}", x),
+                }
+            }
+        }
+    }
+
+    async fn prepare_wake(&mut self) -> Result<(), Self::Error> {
+        self.twim.write(ADDRESS, &[0x0d, 0]).await?; // INT1_CTRL: all cleared
+        self.twim.write(ADDRESS, &[0x10, 0b1000110]).await?; // accel ODR: OP_MODE_XL to low power 1, ODR_XL to 120Hz
+        self.twim.write(ADDRESS, &[0x11, 0b0000000]).await?; // gyro ODR: power down
+        self.twim.write(ADDRESS, &[0x17, 0b10]).await?; // accel range: FS_XL to ±8 g
+        self.twim.write(ADDRESS, &[0x18, 0b10]).await?; // USR_OFF_W to 2^-6 g/LSB
+        self.twim.write(ADDRESS, &[0x56, 0b10000]).await?; // SLOPE_FDS to 1
+        self.twim.write(ADDRESS, &[0x5b, 0b010000]).await?; // WK_THS to 4, USR_OFF_ON_WU to 0
+        self.twim.write(ADDRESS, &[0x5c, 0b1100000]).await?; // WAKE_DUR to 3
+    
+        embassy_time::Timer::after_millis(11).await; // wait for accel to settle
+
+        let port = match self.int1.port() {
+            gpio::Port::Port0 => pac::P0,
+            gpio::Port::Port1 => pac::P1,
+        };
+
+        port.pin_cnf(self.int1.pin() as usize).write(|w| {
+            w.set_dir(pac::gpio::vals::Dir::INPUT);
+            w.set_input(pac::gpio::vals::Input::CONNECT);
+            w.set_pull(pac::gpio::vals::Pull::DISABLED);
+            w.set_sense(pac::gpio::vals::Sense::HIGH);
+        });
+    
+        info!("gn!");
+        self.twim.write(ADDRESS, &[0x50, 0b10000000]).await?; // FUNCTIONS_ENABLE: INTERRUPTS_ENABLE to 1
+        self.twim.write(ADDRESS, &[0x5e, 0b100000]).await?; // MD1_CFG: INT1_WU to 1
+        Ok(())
     }
 }
 
@@ -267,7 +380,7 @@ pub async fn vqf_task(
         let mut size_buf = [0u8; 2];
         unwrap!(twi.write_read(ADDRESS, &hex_1b, &mut size_buf).await);
         let len = size_buf[0] as usize;
-        let read_size = 7 * (len + 1);
+        let read_size = (7 * (len + 1)).clamp(0, 16 * 7);
         let mut buf = [0u8; 7 * 16];
         unwrap!(
             twi.write_read(ADDRESS, &hex_78, &mut buf[..read_size])
@@ -380,7 +493,8 @@ pub async fn vqf_task(
             && (!pac::POWER.usbregstatus().read().vbusdetect())
         {
             unsafe {
-                enter_wake_on_movement(&mut twi).await;
+                let Err(e) = enter_wake_on_movement(&mut twi).await;
+                info!("WOM enter error: {}", e);
             }
         } else if (last_pair_attempt + PAIR_RETRY_INTERVAL + desync_factor) <= Instant::now() {
             pair_data = attempt_pair(&mut radio, (&mut ppi_ch0, &mut ppi_ch1, &mut ppi_ch2)).await;
@@ -404,16 +518,16 @@ pub async fn vqf_task(
     }
 }
 
-async unsafe fn enter_wake_on_movement(twim: &mut twim::Twim<'_, peripherals::TWISPI0>) -> ! {
+async unsafe fn enter_wake_on_movement(twim: &mut twim::Twim<'_, peripherals::TWISPI0>) -> Result<Infallible, twim::Error> {
     info!("getting ready to eep");
-    unwrap!(twim.write(ADDRESS, &[0x0d, 0]).await); // INT1_CTRL: all cleared
-    unwrap!(twim.write(ADDRESS, &[0x10, 0b1000110]).await); // accel ODR: OP_MODE_XL to low power 1, ODR_XL to 120Hz
-    unwrap!(twim.write(ADDRESS, &[0x11, 0b0000000]).await); // gyro ODR: power down
-    unwrap!(twim.write(ADDRESS, &[0x17, 0b10]).await); // accel range: FS_XL to ±8 g
-    unwrap!(twim.write(ADDRESS, &[0x18, 0b10]).await); // USR_OFF_W to 2^-6 g/LSB
-    unwrap!(twim.write(ADDRESS, &[0x56, 0b10000]).await); // SLOPE_FDS to 1
-    unwrap!(twim.write(ADDRESS, &[0x5b, 0b010000]).await); // WK_THS to 4, USR_OFF_ON_WU to 0
-    unwrap!(twim.write(ADDRESS, &[0x5c, 0b1100000]).await); // WAKE_DUR to 3
+    twim.write(ADDRESS, &[0x0d, 0]).await?; // INT1_CTRL: all cleared
+    twim.write(ADDRESS, &[0x10, 0b1000110]).await?; // accel ODR: OP_MODE_XL to low power 1, ODR_XL to 120Hz
+    twim.write(ADDRESS, &[0x11, 0b0000000]).await?; // gyro ODR: power down
+    twim.write(ADDRESS, &[0x17, 0b10]).await?; // accel range: FS_XL to ±8 g
+    twim.write(ADDRESS, &[0x18, 0b10]).await?; // USR_OFF_W to 2^-6 g/LSB
+    twim.write(ADDRESS, &[0x56, 0b10000]).await?; // SLOPE_FDS to 1
+    twim.write(ADDRESS, &[0x5b, 0b010000]).await?; // WK_THS to 4, USR_OFF_ON_WU to 0
+    twim.write(ADDRESS, &[0x5c, 0b1100000]).await?; // WAKE_DUR to 3
 
     embassy_time::Timer::after_millis(11).await; // wait for accel to settle
 
@@ -425,8 +539,8 @@ async unsafe fn enter_wake_on_movement(twim: &mut twim::Twim<'_, peripherals::TW
     });
 
     info!("gn!");
-    unwrap!(twim.write(ADDRESS, &[0x50, 0b10000000]).await); // FUNCTIONS_ENABLE: INTERRUPTS_ENABLE to 1
-    unwrap!(twim.write(ADDRESS, &[0x5e, 0b100000]).await); // MD1_CFG: INT1_WU to 1
+    twim.write(ADDRESS, &[0x50, 0b10000000]).await?; // FUNCTIONS_ENABLE: INTERRUPTS_ENABLE to 1
+    twim.write(ADDRESS, &[0x5e, 0b100000]).await?; // MD1_CFG: INT1_WU to 1
     enter_deep_sleep()
 }
 
