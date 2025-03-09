@@ -42,7 +42,8 @@ impl From<QuaternionQ15> for Quaternion {
 pub struct DataFrame {
     pub device_id: u8,
     pub battery_level: u8,
-    pub accel: [i16; 3],
+    pub accel: [i8; 3],
+    pub temp: i8,
     pub quat: QuaternionQ15,
 }
 
@@ -64,8 +65,9 @@ pub struct TrackerDataFrame {
     pub device_id: [u8; 8],
     pub battery_level: u8,
     pub rssi: u8,
+    pub temp: i8,
     pub accel: [i16; 3],
-    pub quat: Quaternion,
+    pub quat: QuaternionQ15,
 }
 
 pub const CURRENT_PROTOCOL_KEY: Key = Key::for_path::<DataFrame>("tiramisu/air");
@@ -84,6 +86,7 @@ pub mod tracker {
         | ----------                | ---------     | ----------            | ----                          |
         | GetUniqueIdEndpoint       | ()            | u64                   | "poststation/unique_id/get"   |
         | MeowEndpoint              | ()            | Str                   | "meow"                        |
+        | DfuEndpoint               | ()            | ()                    | "enter_dfu"                   |
     }
 
     // incoming topics handled by our device

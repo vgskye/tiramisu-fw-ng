@@ -999,6 +999,7 @@ dependencies = [
  "embassy-usb",
  "esb-embassy",
  "icd",
+ "libm",
  "panic-halt",
  "panic-probe",
  "postcard",

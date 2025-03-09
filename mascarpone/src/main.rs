@@ -19,7 +19,11 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_executor::Spawner;
-use embassy_nrf::{bind_interrupts, pac::{self, radio::vals::Txpower}, peripherals, rng, saadc, twim, usb};
+use embassy_nrf::{
+    bind_interrupts,
+    pac::{self, radio::vals::Txpower},
+    peripherals, rng, saadc, twim, usb,
+};
 use embassy_nrf::{
     config::{DcdcConfig, HfclkSource, Reg0Voltage},
     usb::vbus_detect::HardwareVbusDetect,
@@ -212,8 +216,13 @@ pub async fn esb_recv_task(
                                 device_id,
                                 battery_level: result.battery_level,
                                 rssi,
-                                accel: result.accel,
-                                quat: result.quat.into(),
+                                accel: [
+                                    (result.accel[0] << 6) as i16,
+                                    (result.accel[1] << 6) as i16,
+                                    (result.accel[2] << 6) as i16,
+                                ],
+                                quat: result.quat,
+                                temp: result.temp,
                             },
                         )
                         .await;

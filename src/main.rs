@@ -26,7 +26,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::{
     bind_interrupts, gpio::{self, Pin}, pac, peripherals,
     ppi::ConfigurableChannel,
-    saadc, twim,
+    saadc, twim::{self, Twim},
     usb::{self, vbus_detect::VbusDetect},
 };
 use embassy_nrf::{
@@ -46,6 +46,9 @@ const ACCEL_SENSITIVITY: f32 = 0.244 / 1000.0;
 const UNPAIR_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const SLEEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+const MEM_PAGE_START: u32 = 0xf3000;
+const MEM_PAGE_LENGTH: u32 = 0x1000;
 
 bind_interrupts!(struct Irqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
@@ -179,116 +182,6 @@ async fn main(spawner: Spawner) {
     }
 }
 
-trait Imu {
-    type Error;
-    async fn init(&mut self) -> Result<(), Self::Error>;
-    async fn bulk_read(
-        &mut self,
-        gyro_sample: &mut impl FnMut([f32; 3]),
-        accel_sample: &mut impl FnMut([f32; 3])
-    ) -> Result<(), Self::Error>;
-    async fn prepare_wake(&mut self) -> Result<(), Self::Error>;
-}
-
-struct LSM6DSV<'d, T: twim::Instance> {
-    twim: twim::Twim<'d, T>,
-    int1: gpio::AnyPin
-}
-
-impl<T: twim::Instance> Imu for LSM6DSV<'_, T> {
-    type Error = twim::Error;
-
-    async fn init(&mut self) -> Result<(), Self::Error> {
-        self.twim.write(ADDRESS, &[0x62, 0b00]).await?; // HAODR_CFG to set 00
-        self.twim.write(ADDRESS, &[0x08, 0]).await?; // FIFO_CTRL2
-        self.twim.write(ADDRESS, &[0x10, 0b0010110]).await?; // accel ODR: OP_MODE_XL to HAODR, ODR_XL to 120Hz
-        self.twim.write(ADDRESS, &[0x11, 0b0011000]).await?; // gyro ODR: OP_MODE_G to HAODR, ODR_G to 480Hz
-        self.twim.write(ADDRESS, &[0x12, (1 << 6) | (1 << 2)]).await?; // BDU to 1, IF_INC to 1
-        self.twim.write(ADDRESS, &[0x15, 0b0011]).await?; // gyro range: FS_G to ±1000 dps
-        self.twim.write(ADDRESS, &[0x17, 0b10]).await?; // accel range: FS_XL to ±8 g
-        self.twim.write(ADDRESS, &[0x09, (0b1000) | (0b1000 << 4)]).await?;
-        self.twim.write(ADDRESS, &[0x0a, 0b110]).await?; // FIFO mode: continuous mode
-        self.twim.write(ADDRESS, &[0x13, 0b10]).await?; // DRDY_PULSED to 1
-        self.twim.write(ADDRESS, &[0x0d, 0b1]).await?; // INT1_CTRL: INT1_DRDY_XL to 1
-        Ok(())
-    }
-
-    async fn bulk_read(
-        &mut self,
-        gyro_sample: &mut impl FnMut([f32; 3]),
-        accel_sample: &mut impl FnMut([f32; 3])
-    ) -> Result<(), Self::Error> {
-        #[unsafe(link_section = "data")]
-        static HEX_1B: [u8; 1] = [0x1b];
-        #[unsafe(link_section = "data")]
-        static HEX_78: [u8; 1] = [0x78];
-        let mut size_buf = [0u8; 2];
-        let mut buf = [0u8; 7 * 16];
-        loop {
-            self.twim.write_read(ADDRESS, &HEX_1B, &mut size_buf).await?;
-            let len = (size_buf[0] as usize) | (((size_buf[1] & 0b1) as usize) << 8);
-            let read_size = (7 * (len + 1)).clamp(0, 16 * 7);
-            self.twim.write_read(ADDRESS, &HEX_78, &mut buf[..read_size]).await?;
-            let buf: &[[u8; 7]; 16] = zerocopy::transmute_ref!(&buf);
-            for entry in &buf[..(len + 1)] {
-                let tag = entry[0] >> 3;
-                match tag {
-                    0x00 => {
-                        return Ok(())
-                    },
-                    0x01 => {
-                        let x = i16::from_le_bytes([entry[1], entry[2]]);
-                        let y = i16::from_le_bytes([entry[3], entry[4]]);
-                        let z = i16::from_le_bytes([entry[5], entry[6]]);
-                        gyro_sample([GSCALE * x as f32, GSCALE * y as f32, GSCALE * z as f32])
-                    }
-                    0x02 => {
-                        let x = i16::from_le_bytes([entry[1], entry[2]]);
-                        let y = i16::from_le_bytes([entry[3], entry[4]]);
-                        let z = i16::from_le_bytes([entry[5], entry[6]]);
-                        accel_sample([
-                            ACCEL_SENSITIVITY * x as f32,
-                            ACCEL_SENSITIVITY * y as f32,
-                            ACCEL_SENSITIVITY * z as f32,
-                        ])
-                    }
-                    x => info!("unknown tag: {=u8:02X}", x),
-                }
-            }
-        }
-    }
-
-    async fn prepare_wake(&mut self) -> Result<(), Self::Error> {
-        self.twim.write(ADDRESS, &[0x0d, 0]).await?; // INT1_CTRL: all cleared
-        self.twim.write(ADDRESS, &[0x10, 0b1000110]).await?; // accel ODR: OP_MODE_XL to low power 1, ODR_XL to 120Hz
-        self.twim.write(ADDRESS, &[0x11, 0b0000000]).await?; // gyro ODR: power down
-        self.twim.write(ADDRESS, &[0x17, 0b10]).await?; // accel range: FS_XL to ±8 g
-        self.twim.write(ADDRESS, &[0x18, 0b10]).await?; // USR_OFF_W to 2^-6 g/LSB
-        self.twim.write(ADDRESS, &[0x56, 0b10000]).await?; // SLOPE_FDS to 1
-        self.twim.write(ADDRESS, &[0x5b, 0b010000]).await?; // WK_THS to 4, USR_OFF_ON_WU to 0
-        self.twim.write(ADDRESS, &[0x5c, 0b1100000]).await?; // WAKE_DUR to 3
-    
-        embassy_time::Timer::after_millis(11).await; // wait for accel to settle
-
-        let port = match self.int1.port() {
-            gpio::Port::Port0 => pac::P0,
-            gpio::Port::Port1 => pac::P1,
-        };
-
-        port.pin_cnf(self.int1.pin() as usize).write(|w| {
-            w.set_dir(pac::gpio::vals::Dir::INPUT);
-            w.set_input(pac::gpio::vals::Input::CONNECT);
-            w.set_pull(pac::gpio::vals::Pull::DISABLED);
-            w.set_sense(pac::gpio::vals::Sense::HIGH);
-        });
-    
-        info!("gn!");
-        self.twim.write(ADDRESS, &[0x50, 0b10000000]).await?; // FUNCTIONS_ENABLE: INTERRUPTS_ENABLE to 1
-        self.twim.write(ADDRESS, &[0x5e, 0b100000]).await?; // MD1_CFG: INT1_WU to 1
-        Ok(())
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[embassy_executor::task]
 pub async fn vqf_task(
@@ -322,6 +215,9 @@ pub async fn vqf_task(
 
     let mut last_successful_tx = Instant::now();
 
+    let mut skipped_tx_count = 0;
+    let mut last_tx_quat = vqf_rs::Quaternion(0., 0., 0., 0.);
+
     info!("Resetting IMU...");
     unwrap!(twi.write(ADDRESS, &[0x12, 0b1]).await);
     info!("Waiting for reset...");
@@ -336,7 +232,7 @@ pub async fn vqf_task(
     unwrap!(twi.write(ADDRESS, &[0x15, 0b0011]).await); // gyro range: FS_G to ±1000 dps
     unwrap!(twi.write(ADDRESS, &[0x17, 0b10]).await); // accel range: FS_XL to ±8 g
     unwrap!(twi.write(ADDRESS, &[0x09, (0b1000) | (0b1000 << 4)]).await);
-    unwrap!(twi.write(ADDRESS, &[0x0a, 0b110]).await); // FIFO mode: continuous mode
+    unwrap!(twi.write(ADDRESS, &[0x0a, 0b110110]).await); // FIFO mode: continuous mode, temp at 60Hz
     unwrap!(twi.write(ADDRESS, &[0x13, 0b10]).await); // DRDY_PULSED to 1
     unwrap!(twi.write(ADDRESS, &[0x0d, 0b1]).await); // INT1_CTRL: INT1_DRDY_XL to 1
 
@@ -373,6 +269,8 @@ pub async fn vqf_task(
 
     let hex_1b = [0x1b];
     let hex_78 = [0x78];
+
+    let mut last_temp = 0i16;
 
     let mut seq: u32 = 0;
 
@@ -420,6 +318,11 @@ pub async fn vqf_task(
                         ACCEL_SENSITIVITY * z as f32,
                     ])
                 }
+                0x03 => {
+                    let temp = i16::from_le_bytes([entry[1], entry[2]]);
+                    last_temp = temp;
+                    // info!("temp: {}", (temp as f32 / 256.0) + 25.0);
+                }
                 x => info!("unknown tag: {=u8:02X}", x),
             }
         }
@@ -455,39 +358,54 @@ pub async fn vqf_task(
 
         let voltage = saadc_buf[0] as f32 * (6.0 / 4096.0);
 
-        let quat = vqf.quat_6d();
-        let quat = icd::Quaternion(quat.0, quat.1, quat.2, quat.3);
+        let quat_vqf = vqf.quat_6d();
+        let quat = icd::Quaternion(quat_vqf.0, quat_vqf.1, quat_vqf.2, quat_vqf.3);
         _ = sender
             .publish::<icd::tracker::VqfData>(seq.into(), &quat)
             .await;
         seq += 1;
+        let diff_quat = last_tx_quat * quat_vqf;
+        let should_send = skipped_tx_count > 4 || libm::fabsf(libm::acosf(diff_quat.0.clamp(0.0, 1.0)) * 2.0) > 0.001;
+        skipped_tx_count += 1;
         if let Some(pair_data_real) = &pair_data {
-            if let Ok(mut packet) = postcard::serialize_with_flavor(
-                &icd::DataFrame {
-                    device_id: pair_data_real.assigned_id,
-                    battery_level: ((voltage / 5.0) * 256.0) as u8,
-                    accel: [x_accel_last, y_accel_last, z_accel_last],
-                    quat: quat.into(),
-                },
-                PacketPostcardWriter(Packet::new()),
-            ) {
-                if let Ok(packet) = radio
-                    .try_send_with_ack(
-                        pac::TIMER0,
-                        &mut packet,
-                        1,
-                        (&mut ppi_ch0, &mut ppi_ch1, &mut ppi_ch2),
-                    )
-                    .await
-                {
-                    // info!("recv'd ack: {}", &packet as &[u8]);
-                    if packet.is_empty() {
-                        last_successful_tx = Instant::now();
+            if should_send {
+                if let Ok(mut packet) = postcard::serialize_with_flavor(
+                    &icd::DataFrame {
+                        device_id: pair_data_real.assigned_id,
+                        battery_level: ((voltage / 5.0) * 256.0) as u8,
+                        accel: [
+                            (x_accel_last >> 6).clamp(-128, 127) as i8,
+                            (y_accel_last >> 6).clamp(-128, 127) as i8,
+                            (z_accel_last >> 6).clamp(-128, 127) as i8
+                        ],
+                        quat: quat.into(),
+                        temp: (last_temp >> 7).clamp(-128, 127) as i8
+                    },
+                    PacketPostcardWriter(Packet::new()),
+                ) {
+                    info!("{}", packet.len());
+                    if let Ok(packet) = radio
+                        .try_send_with_ack(
+                            pac::TIMER0,
+                            &mut packet,
+                            1,
+                            (&mut ppi_ch0, &mut ppi_ch1, &mut ppi_ch2),
+                        )
+                        .await
+                    {
+                        // info!("recv'd ack: {}", &packet as &[u8]);
+                        if packet.is_empty() {
+                            last_successful_tx = Instant::now();
+                            last_tx_quat = vqf_rs::Quaternion(quat.0, -quat.1, -quat.2, -quat.3);
+                            skipped_tx_count = 0;
+                        }
+                    } else if (last_successful_tx + UNPAIR_TIMEOUT + desync_factor) <= Instant::now() {
+                        info!("Unpairing!");
+                        pair_data = None;
                     }
-                } else if (last_successful_tx + UNPAIR_TIMEOUT + desync_factor) <= Instant::now() {
-                    info!("Unpairing!");
-                    pair_data = None;
                 }
+            } else {
+                info!("Skipping transmit");
             }
         } else if (last_successful_tx + SLEEP_TIMEOUT) <= Instant::now()
             && (!pac::POWER.usbregstatus().read().vbusdetect())

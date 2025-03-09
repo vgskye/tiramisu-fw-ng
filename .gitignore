@@ -1,3 +1,6 @@
 /target
 /espresso/target
 /quatify
+/uf2conv.py
+/uf2families.json
+*.uf2

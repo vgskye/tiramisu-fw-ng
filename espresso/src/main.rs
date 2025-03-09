@@ -74,6 +74,7 @@ async fn main() -> color_eyre::Result<()> {
                 .await?;
             tid
         };
+        let quat: icd::Quaternion = data.quat.into();
         let quatbuf = [
             &[
                 0u8, 0, 0, 17, // pkt type
@@ -81,10 +82,10 @@ async fn main() -> color_eyre::Result<()> {
                 0, // sensor id
                 1, // data type (DATA_TYPE_NORMAL)
             ] as &[u8],
-            &data.quat.1.to_be_bytes(),
-            &data.quat.2.to_be_bytes(),
-            &data.quat.3.to_be_bytes(),
-            &data.quat.0.to_be_bytes(),
+            &quat.1.to_be_bytes(),
+            &quat.2.to_be_bytes(),
+            &quat.3.to_be_bytes(),
+            &quat.0.to_be_bytes(),
             &[0], // cal info (unused)
         ]
         .into_iter()
@@ -141,6 +142,19 @@ async fn main() -> color_eyre::Result<()> {
             0, // sensor id
             (-(data.rssi as i8) as u8),
         ];
+        let temp = (data.temp as f32 / 2.0) + 25.0;
+        let tempbuf = [
+            &[
+                0u8, 0, 0, 20, // pkt type
+                // 0, 0, 0, 0, 0, 0, 0, 0, // pkt id
+                0, // sensor id
+            ] as &[u8],
+            &(temp).to_be_bytes(),
+        ]
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
         // tid.send(&rssibuf).await?;
         let bundlebuf = [
             &[
@@ -155,6 +169,8 @@ async fn main() -> color_eyre::Result<()> {
             &batbuf,
             &(rssibuf.len() as u16).to_be_bytes(),
             &rssibuf,
+            &(tempbuf.len() as u16).to_be_bytes(),
+            &tempbuf,
         ]
         .into_iter()
         .flatten()

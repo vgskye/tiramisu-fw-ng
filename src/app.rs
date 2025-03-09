@@ -1,13 +1,13 @@
 //! A basic postcard-rpc/poststation-compatible application
 
-use crate::handlers::{meow, unique_id};
+use crate::handlers::{enter_dfu, meow, unique_id};
 use embassy_nrf::{
     gpio::Output,
     peripherals::USBD,
     usb::{self, vbus_detect::HardwareVbusDetect},
 };
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use icd::tracker::{GetUniqueIdEndpoint, MeowEndpoint};
+use icd::tracker::{DfuEndpoint, GetUniqueIdEndpoint, MeowEndpoint};
 use icd::tracker::{ENDPOINT_LIST, TOPICS_IN_LIST, TOPICS_OUT_LIST};
 use postcard_rpc::server::impls::embassy_usb_v0_4::{
     dispatch_impl::{spawn_fn, WireRxBuf, WireRxImpl, WireSpawnImpl, WireStorage, WireTxImpl},
@@ -110,6 +110,7 @@ define_dispatch! {
         | ----------                | ----      | -------                       |
         | GetUniqueIdEndpoint       | blocking  | unique_id                     |
         | MeowEndpoint              | blocking  | meow                          |
+        | DfuEndpoint               | blocking  | enter_dfu                     |
     };
 
     // Topics IN are messages we receive from the client, but that we do not reply
