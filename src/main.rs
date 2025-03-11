@@ -24,10 +24,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 use embassy_executor::Spawner;
 use embassy_nrf::{
-    bind_interrupts, gpio::{self, Pin}, pac, peripherals,
-    ppi::ConfigurableChannel,
-    saadc, twim::{self, Twim},
-    usb::{self, vbus_detect::VbusDetect},
+    bind_interrupts, gpio::{self, Pin}, gpiote, pac, peripherals, ppi::{self, ConfigurableChannel}, saadc, timer, twim::{self, Twim}, usb::{self, vbus_detect::VbusDetect}
 };
 use embassy_nrf::{
     config::{DcdcConfig, HfclkSource, Reg0Voltage},
@@ -158,7 +155,7 @@ async fn main(spawner: Spawner) {
     // spawner.must_spawn(esb_recv_task(radio, sender.clone()));
     spawner.must_spawn(vqf_task(
         p.TWISPI0, p.P0_13, p.P0_15, p.SAADC, p.P0_17, sender, radio, p.PPI_CH0, p.PPI_CH1,
-        p.PPI_CH2, Duration::from_millis(unique_id & 0b1111)
+        p.PPI_CH2, p.PPI_CH3, p.TIMER1, p.GPIOTE_CH0, Duration::from_millis(unique_id & 0b1111)
     ));
 
     // Begin running!
@@ -195,6 +192,9 @@ pub async fn vqf_task(
     mut ppi_ch0: embassy_nrf::peripherals::PPI_CH0,
     mut ppi_ch1: embassy_nrf::peripherals::PPI_CH1,
     mut ppi_ch2: embassy_nrf::peripherals::PPI_CH2,
+    ppi_ch3: embassy_nrf::peripherals::PPI_CH3,
+    timer1: embassy_nrf::peripherals::TIMER1,
+    gpiote_ch0: embassy_nrf::peripherals::GPIOTE_CH0,
     desync_factor: Duration,
 ) {
     info!("Initializing TWI...");
@@ -235,6 +235,10 @@ pub async fn vqf_task(
     unwrap!(twi.write(ADDRESS, &[0x0a, 0b110110]).await); // FIFO mode: continuous mode, temp at 60Hz
     unwrap!(twi.write(ADDRESS, &[0x13, 0b10]).await); // DRDY_PULSED to 1
     unwrap!(twi.write(ADDRESS, &[0x0d, 0b1]).await); // INT1_CTRL: INT1_DRDY_XL to 1
+    
+    let mut freq_buf = [0u8; 1];
+    unwrap!(twi.write_read(ADDRESS, &[0x4F], &mut freq_buf).await);
+    info!("freq_fine: {}", i8::from_be_bytes(freq_buf));
 
     let mut vqf = VQF::new(
         1.0 / 480.0,
@@ -265,7 +269,19 @@ pub async fn vqf_task(
     let mut y_off = 0;
     let mut z_off = 0;
 
-    let mut int = gpio::Input::new(p0_17, embassy_nrf::gpio::Pull::None);
+    let int = gpio::Input::new(p0_17, embassy_nrf::gpio::Pull::None);
+
+    let timer = timer::Timer::new(timer1);
+
+    timer.set_frequency(timer::Frequency::F16MHz);
+    timer.start();
+    let cc = timer.cc(0);
+
+
+    let int = gpiote::InputChannel::new(gpiote_ch0, int, gpiote::InputChannelPolarity::LoToHi);
+
+    let mut ppi = ppi::Ppi::new_one_to_two(ppi_ch3, int.event_in(), cc.task_capture(), timer.task_clear());
+    ppi.enable();
 
     let hex_1b = [0x1b];
     let hex_78 = [0x78];
@@ -432,7 +448,7 @@ pub async fn vqf_task(
         //     last_pair_attempt,
         //     pair_data.is_some()
         // );
-        int.wait_for_rising_edge().await;
+        int.wait().await;
     }
 }
 
