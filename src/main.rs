@@ -291,6 +291,12 @@ pub async fn vqf_task(
     let mut seq: u32 = 0;
 
     loop {
+        let cc_tick = cc.read();
+        let mut gyr_timestep = cc_tick as f32 / 64000000.0;
+        if (gyr_timestep - (1.0 / 480.0)).abs() > 0.0001 {
+            gyr_timestep = 1.0 / 480.0;
+        }
+
         let mut size_buf = [0u8; 2];
         unwrap!(twi.write_read(ADDRESS, &hex_1b, &mut size_buf).await);
         let len = size_buf[0] as usize;
@@ -319,7 +325,7 @@ pub async fn vqf_task(
                         z_acc += z as i32;
                         cnt_acc += 1;
                     }
-                    vqf.update_gyr([GSCALE * x as f32, GSCALE * y as f32, GSCALE * z as f32])
+                    vqf.update_gyr_with_ts([GSCALE * x as f32, GSCALE * y as f32, GSCALE * z as f32], gyr_timestep)
                 }
                 0x02 => {
                     let x = i16::from_le_bytes([entry[1], entry[2]]);
@@ -426,6 +432,8 @@ pub async fn vqf_task(
         } else if (last_successful_tx + SLEEP_TIMEOUT) <= Instant::now()
             && (!pac::POWER.usbregstatus().read().vbusdetect())
         {
+            ppi.disable();
+            timer.stop();
             unsafe {
                 let Err(e) = enter_wake_on_movement(&mut twi).await;
                 info!("WOM enter error: {}", e);

@@ -1100,9 +1100,9 @@ dependencies = [
 
 [[package]]
 name = "vqf-rs"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ec458b77770c2c2f5b13a684992cf1e35308f0593c62844afb3750c66737ea4"
+checksum = "e6bee49d5fd327532ec2dae66b261f858a8055ba45c24677ce8cacf9206a192a"
 dependencies = [
  "libm",
 ]

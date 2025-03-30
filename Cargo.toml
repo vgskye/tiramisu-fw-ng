@@ -26,7 +26,7 @@ postcard-rpc = { version = "0.11.8", features = ["embassy-usb-0_4-server"] }
 postcard-schema = "0.2.1"
 serde = { version = "1.0.218", default-features = false, features = ["derive"] }
 static_cell = "2.1.0"
-vqf-rs = { version = "0.2.0", default-features = false, features = ["libm", "motion-bias-estimation", "f32"] }
+vqf-rs = { version = "0.3.0", default-features = false, features = ["libm", "motion-bias-estimation", "f32"] }
 zerocopy = "0.8.20"
 zerocopy-derive = "0.8.20"
 
