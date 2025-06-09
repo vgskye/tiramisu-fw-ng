@@ -24,7 +24,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 use embassy_executor::Spawner;
 use embassy_nrf::{
-    bind_interrupts, gpio::{self, Pin}, gpiote, pac, peripherals, ppi::{self, ConfigurableChannel}, saadc, timer, twim::{self, Twim}, usb::{self, vbus_detect::VbusDetect}
+    bind_interrupts, config::LfclkSource, gpio::{self, Pin}, gpiote, pac::{self, TIMER1}, peripherals, ppi::{self, ConfigurableChannel}, saadc, timer, twim::{self, Twim}, usb::{self, vbus_detect::VbusDetect}
 };
 use embassy_nrf::{
     config::{DcdcConfig, HfclkSource, Reg0Voltage},
@@ -62,7 +62,7 @@ fn get_unique_id() -> u64 {
 }
 
 fn usb_config(serial: &'static str) -> embassy_usb::Config<'static> {
-    let mut config = embassy_usb::Config::new(0x1209, 0x0001);
+    let mut config = embassy_usb::Config::new(0x1209, 0x6970);
     config.manufacturer = Some("SkyeLabs");
     config.product = Some("Tiramisu");
     config.serial_number = Some(serial);
@@ -82,6 +82,7 @@ static USB_SIG: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut c = embassy_nrf::config::Config::default();
+    c.lfclk_source = LfclkSource::Synthesized;
     c.hfclk_source = HfclkSource::ExternalXtal;
     c.dcdc = DcdcConfig {
         reg0: false,
@@ -435,6 +436,8 @@ pub async fn vqf_task(
             ppi.disable();
             timer.stop();
             unsafe {
+                // https://docs.nordicsemi.com/bundle/errata_nRF52840_Rev3/page/ERR/nRF52840/Rev3/latest/anomaly_840_78.html
+                TIMER1.tasks_shutdown().write_value(1);
                 let Err(e) = enter_wake_on_movement(&mut twi).await;
                 info!("WOM enter error: {}", e);
             }

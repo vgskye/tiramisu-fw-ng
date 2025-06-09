@@ -45,7 +45,7 @@ fn get_unique_id() -> u64 {
 }
 
 fn usb_config(serial: &'static str) -> embassy_usb::Config<'static> {
-    let mut config = embassy_usb::Config::new(0x1209, 0x0002);
+    let mut config = embassy_usb::Config::new(0x1209, 0x6971);
     config.manufacturer = Some("SkyeLabs");
     config.product = Some("Mascarpone");
     config.serial_number = Some(serial);

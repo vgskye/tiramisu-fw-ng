@@ -50,7 +50,7 @@ async fn try_discover_slimevr_server(id: u64) -> color_eyre::Result<UdpSocket> {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     let client: HostClient<WireError> = HostClient::try_new_raw_nusb(
-        |d| d.product_string() == Some("Mascarpone"),
+        |d| d.vendor_id() == 0x1209 && d.product_id() == 0x6971,
         ERROR_PATH,
         8,
         VarSeqKind::Seq1,
